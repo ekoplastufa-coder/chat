@@ -1,0 +1,1 @@
+# Pro100 Ozon Analytics\n\nRailway variables: `OZON_CLIENT_ID`, `OZON_API_KEY`. Do not store their values in GitHub.\n\nEndpoints: `/health`, `/products`, `/finance`, `/finance/september`, `/sku/{sku}`.\n
