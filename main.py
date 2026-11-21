@@ -1,15 +1,19 @@
 import os
-from datetime import date, datetime, timedelta
+import secrets
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 app = FastAPI(title="Pro100 Ozon Analytics", version="3.0.0")
 
 BASE = "https://api-seller.ozon.ru"
 CLIENT_ID = os.getenv("OZON_CLIENT_ID", "")
 API_KEY = os.getenv("OZON_API_KEY", "")
+CONNECTION_TOKEN = os.getenv("OZON_CONNECTION_TOKEN", "")
+connection_bearer = HTTPBearer(auto_error=False)
 
 
 # =========================================================
@@ -30,8 +34,8 @@ def headers():
     }
 
 
-async def post(path: str, payload: Dict[str, Any]):
-    async with httpx.AsyncClient(timeout=120) as client:
+async def post(path: str, payload: Dict[str, Any], *, timeout: float = 120):
+    async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(
             BASE + path,
             headers=headers(),
@@ -103,6 +107,48 @@ def health():
 # =========================================================
 # PRODUCTS
 # =========================================================
+
+@app.get("/connection-check", operation_id="ozon_check_connection")
+async def ozon_check_connection(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(connection_bearer),
+):
+    if not CONNECTION_TOKEN:
+        raise HTTPException(503, "Connection check is unavailable")
+    if not credentials or not secrets.compare_digest(
+        credentials.credentials.encode(), CONNECTION_TOKEN.encode()
+    ):
+        raise HTTPException(
+            401, "Invalid credentials", headers={"WWW-Authenticate": "Bearer"}
+        )
+
+    try:
+        data = await post(
+            "/v3/product/list",
+            {"filter": {"visibility": "ALL"}, "last_id": "", "limit": 1},
+            timeout=10,
+        )
+    except HTTPException as exc:
+        if not CLIENT_ID or not API_KEY:
+            raise HTTPException(503, "Ozon credentials are not configured") from exc
+        raise HTTPException(502, {"ozon_status": exc.status_code}) from exc
+    except httpx.TimeoutException as exc:
+        raise HTTPException(504, "Ozon did not respond in time") from exc
+    except (httpx.RequestError, ValueError) as exc:
+        raise HTTPException(502, "Invalid or unavailable Ozon response") from exc
+
+    result = data.get("result") if isinstance(data, dict) else None
+    items = result.get("items") if isinstance(result, dict) else None
+    if not isinstance(items, list) or len(items) > 1 or (
+        items and not isinstance(items[0], dict)
+    ):
+        raise HTTPException(502, "Unexpected Ozon catalog response")
+
+    return {
+        "ozon_status": 200,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "offer_id": items[0].get("offer_id") if items else None,
+    }
+
 
 async def get_products_all():
     """
